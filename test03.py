@@ -16,11 +16,11 @@ class SmallQuantCNN(nn.Module):
         self.quant   = QuantStub()
         self.dequant = DeQuantStub()
 
-        self.conv1 = nn.Conv2d(1, 6, kernel_size=3, stride=1, padding=1)
+        self.conv1 = nn.Conv2d(1, 6, kernel_size=3, stride=1, padding=1, bias=False)
         self.relu1 = nn.ReLU(inplace=True)
         self.pool1 = nn.MaxPool2d(2)
 
-        self.conv2 = nn.Conv2d(6, 12, kernel_size=3, stride=1, padding=1)
+        self.conv2 = nn.Conv2d(6, 12, kernel_size=3, stride=1, padding=1, bias=False)
         self.relu2 = nn.ReLU(inplace=True)
         self.pool2 = nn.MaxPool2d(2)
 
