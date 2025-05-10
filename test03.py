@@ -6,6 +6,7 @@ from torch.quantization import QuantStub, DeQuantStub
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 import multiprocessing
+import numpy as np
 
 # --------------------------
 # 1. 定義 CNN 模型（支援 QAT）
@@ -20,11 +21,11 @@ class SmallQuantCNN(nn.Module):
         self.relu1 = nn.ReLU(inplace=True)
         self.pool1 = nn.MaxPool2d(2) # 輸出 8x8
 
-        self.conv2 = nn.Conv2d(4, 6, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv2 = nn.Conv2d(4, 5, kernel_size=3, stride=1, padding=1, bias=False)
         self.relu2 = nn.ReLU(inplace=True)
         self.pool2 = nn.MaxPool2d(8)
 
-        self.fc  = nn.Linear(6, 10, bias=False)
+        self.fc  = nn.Linear(5, 10, bias=False)
 
         # 融合 Conv+ReLU
         torch.quantization.fuse_modules(self, ['conv1', 'relu1'], inplace=True)
@@ -108,23 +109,50 @@ def main():
     criterion = nn.CrossEntropyLoss()
 
     best_acc = 0.0
-    for epoch in range(1, 20):
+    last_5_acc = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    for epoch in range(1, 50):
         tr_loss, tr_acc = train_epoch(model, train_loader, optimizer, criterion, device)
         val_loss, val_acc = eval_model(model, test_loader, criterion, device)
         print(f'Epoch {epoch:2d} | Train Acc: {tr_acc:.3f} | Val Acc: {val_acc:.3f}')
         if val_acc > best_acc:
             best_acc = val_acc
             torch.save(model.state_dict(), 'best_qat.pth')
-        if best_acc >= 0.8:
-            print("已達 80% 準確度，提前停止訓練")
+
+        last_5_acc[0:4] = last_5_acc[1:]
+        last_5_acc[4] = val_acc
+        if np.std(last_5_acc) < 0.002:
+            print("周圍地貌近乎平坦，結束訓練")
             break
 
     # 轉為 INT8 真正量化模型
     print("轉換為 INT8 量化模型...")
     model.cpu().eval()
     quantized_model = torch.quantization.convert(model, inplace=False)
-    torch.save(quantized_model.state_dict(), 'mnist_int8_2.pth')
+
+    torch.save(quantized_model.state_dict(), 'mnist_int8.pth')
     print("量化模型已儲存為 mnist_int8.pth")
+
+    with open('mnist_int8_params.txt', 'w') as f:
+        for name, module in quantized_model.named_modules():
+            if isinstance(module, torch.nn.quantized.Conv2d) \
+            or isinstance(module, torch.nn.quantized.Linear):
+                qweight = module.weight()
+                # 取整數值矩陣
+                w_int = qweight.int_repr().cpu().numpy()
+                # 取 scale / zero_point
+                scale = module.scale
+                zp    = module.zero_point
+
+                f.write(f"=== {name}.weight (qint8) ===\n")
+                f.write(f"# scale = {scale}, zero_point = {zp}\n")
+                f.write(np.array2string(
+                    w_int,
+                    separator=', ',
+                    max_line_width=np.inf,
+                    threshold=w_int.size+1
+                ) + '\n\n')
+
+    print("量化後參數已匯出為 mnist_int8_params.txt")
 
     # 測試
     test_loss, test_acc = eval_model(quantized_model, test_loader, criterion, torch.device('cpu'))
