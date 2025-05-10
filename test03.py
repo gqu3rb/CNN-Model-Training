@@ -2,11 +2,32 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.quantization
-from torch.quantization import QuantStub, DeQuantStub
+from torch.quantization import QuantStub, DeQuantStub, QConfig
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
+from torch.quantization.observer import PerChannelMinMaxObserver, MovingAverageMinMaxObserver
+from torch.quantization.fake_quantize import FakeQuantize
 import multiprocessing
 import numpy as np
+
+# 對稱 signed int8 activation fake‐quant
+SymmetricActFakeQuant = FakeQuantize.with_args(
+    observer=MovingAverageMinMaxObserver,   # 可改成其他 observer
+    quant_min=-127,                         # signed 8‐bit 對稱
+    quant_max=127,
+    dtype=torch.qint8,
+    qscheme=torch.per_tensor_symmetric
+)
+
+# 對稱 per‐channel signed int8 weight fake‐quant
+SymmetricWgtFakeQuant = FakeQuantize.with_args(
+    observer=PerChannelMinMaxObserver,
+    quant_min=-127,
+    quant_max=127,
+    dtype=torch.qint8,
+    qscheme=torch.per_channel_symmetric,
+    ch_axis=0
+)
 
 # --------------------------
 # 1. 定義 CNN 模型（支援 QAT）
@@ -79,6 +100,9 @@ def binarize_input(x): # 圖片像素二質化
                              #      return tensor([0.0, 1.0, 0.0, 1.0])
 
 def main():
+    # 使 fc 層的 zero_point 恆為零
+    torch.backends.quantized.engine = 'fbgemm'
+
     multiprocessing.freeze_support()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -101,6 +125,12 @@ def main():
     # 初始化模型 + QAT 設定
     model = SmallQuantCNN().to(device)
     model.qconfig = torch.quantization.get_default_qat_qconfig('fbgemm')
+
+    # 使 fc 層的 zero_point 恆為零
+    model.fc.qconfig = QConfig(
+        activation = SymmetricActFakeQuant,
+        weight     = SymmetricWgtFakeQuant
+    )
     torch.quantization.prepare_qat(model, inplace=True)
 
     print(f"模型總參數數量：{sum(p.numel() for p in model.parameters()):,d}")
@@ -110,7 +140,7 @@ def main():
 
     best_acc = 0.0
     last_5_acc = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
-    for epoch in range(1, 50):
+    for epoch in range(1, 51):
         tr_loss, tr_acc = train_epoch(model, train_loader, optimizer, criterion, device)
         val_loss, val_acc = eval_model(model, test_loader, criterion, device)
         print(f'Epoch {epoch:2d} | Train Acc: {tr_acc:.3f} | Val Acc: {val_acc:.3f}')
