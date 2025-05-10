@@ -16,16 +16,15 @@ class SmallQuantCNN(nn.Module):
         self.quant   = QuantStub()
         self.dequant = DeQuantStub()
 
-        self.conv1 = nn.Conv2d(1, 6, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv1 = nn.Conv2d(1, 4, kernel_size=3, stride=1, padding=1, bias=False)
         self.relu1 = nn.ReLU(inplace=True)
-        self.pool1 = nn.MaxPool2d(2)
+        self.pool1 = nn.MaxPool2d(2) # 輸出 8x8
 
-        self.conv2 = nn.Conv2d(6, 12, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv2 = nn.Conv2d(4, 6, kernel_size=3, stride=1, padding=1, bias=False)
         self.relu2 = nn.ReLU(inplace=True)
-        self.pool2 = nn.MaxPool2d(2)
+        self.pool2 = nn.MaxPool2d(8)
 
-        self.gap = nn.AdaptiveAvgPool2d(1)
-        self.fc  = nn.Linear(12, 10)
+        self.fc  = nn.Linear(6, 10, bias=False)
 
         # 融合 Conv+ReLU
         torch.quantization.fuse_modules(self, ['conv1', 'relu1'], inplace=True)
@@ -34,9 +33,8 @@ class SmallQuantCNN(nn.Module):
     def forward(self, x):
         x = self.quant(x)  # ➤ fake quantization 開始
 
-        x = self.pool1(self.relu1(self.conv1(x)))  # (B,6,8,8)
-        x = self.pool2(self.relu2(self.conv2(x)))  # (B,12,4,4)
-        x = self.gap(x)
+        x = self.pool1(self.relu1(self.conv1(x)))
+        x = self.pool2(self.relu2(self.conv2(x)))
         x = x.view(x.size(0), -1)
         x = self.fc(x)
 
@@ -49,7 +47,7 @@ class SmallQuantCNN(nn.Module):
 def train_epoch(model, loader, optimizer, criterion, device):
     model.train()
     total_loss, correct = 0.0, 0
-    for images, labels in loader:
+    for images, labels in loader: # Related to: Pytorch_Tutorial_1.pdf, P.39
         images, labels = images.to(device), labels.to(device)
         optimizer.zero_grad()
         outputs = model(images)
@@ -75,8 +73,9 @@ def eval_model(model, loader, criterion, device):
 # --------------------------
 # 3. 主程序
 # --------------------------
-def binarize_input(x):
-    return (x > 0.5).float()
+def binarize_input(x): # 圖片像素二質化
+    return (x > 0.5).float() # e.g. x = torch.tensor([0.2, 0.7, 0.3, 0.9])
+                             #      return tensor([0.0, 1.0, 0.0, 1.0])
 
 def main():
     multiprocessing.freeze_support()
@@ -87,17 +86,16 @@ def main():
 
     transform = transforms.Compose([
         transforms.CenterCrop(16),
-        transforms.ToTensor(),
-        transforms.Lambda(binarize_input)  # 替代 lambda
-        # transforms.Normalize((0.5,), (0.5,))
+        transforms.ToTensor(), # 將圖片的儲存格式從 numpy 轉成 tensor，並將所有元素轉換為 0 到 1 間的浮點數
+        transforms.Lambda(binarize_input)
     ])
 
 
     train_ds = datasets.MNIST('./data', train=True,  download=True, transform=transform)
     test_ds  = datasets.MNIST('./data', train=False, download=True, transform=transform)
 
-    train_loader = DataLoader(train_ds, batch_size=128, shuffle=True,  num_workers=4, pin_memory=True)
-    test_loader  = DataLoader(test_ds, batch_size=128, shuffle=False, num_workers=4, pin_memory=True)
+    train_loader = DataLoader(train_ds, batch_size=10, shuffle=True,  num_workers=4, pin_memory=True) # shuffle=True 將訓練數據的順序打亂，避免過擬合
+    test_loader  = DataLoader(test_ds, batch_size=10, shuffle=False, num_workers=4, pin_memory=True)
 
     # 初始化模型 + QAT 設定
     model = SmallQuantCNN().to(device)
@@ -110,14 +108,14 @@ def main():
     criterion = nn.CrossEntropyLoss()
 
     best_acc = 0.0
-    for epoch in range(1, 11):
+    for epoch in range(1, 20):
         tr_loss, tr_acc = train_epoch(model, train_loader, optimizer, criterion, device)
         val_loss, val_acc = eval_model(model, test_loader, criterion, device)
         print(f'Epoch {epoch:2d} | Train Acc: {tr_acc:.3f} | Val Acc: {val_acc:.3f}')
         if val_acc > best_acc:
             best_acc = val_acc
             torch.save(model.state_dict(), 'best_qat.pth')
-        if best_acc >= 0.80:
+        if best_acc >= 0.8:
             print("已達 80% 準確度，提前停止訓練")
             break
 
