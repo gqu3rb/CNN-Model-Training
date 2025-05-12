@@ -11,23 +11,20 @@ import multiprocessing
 import numpy as np
 import copy
 
-# 對稱 signed int8 activation fake‐quant
-SymmetricActFakeQuant = FakeQuantize.with_args(
-    observer=MovingAverageMinMaxObserver,   # 可改成其他 observer
-    quant_min=-128,                         # signed 8‐bit 對稱
-    quant_max=127,
-    dtype=torch.qint8,
-    qscheme=torch.per_tensor_symmetric
+actFakeQuant = FakeQuantize.with_args(
+    observer=MovingAverageMinMaxObserver,
+    quant_min=0,
+    quant_max=255,
+    dtype=torch.quint8,
+    qscheme=torch.per_tensor_affine
 )
 
-# 對稱 per‐channel signed int8 weight fake‐quant
-SymmetricWgtFakeQuant = FakeQuantize.with_args(
-    observer=PerChannelMinMaxObserver,
+wgtFakeQuant = FakeQuantize.with_args(
+    observer=MovingAverageMinMaxObserver,
     quant_min=-128,
     quant_max=127,
     dtype=torch.qint8,
-    qscheme=torch.per_channel_symmetric,
-    ch_axis=0
+    qscheme=torch.per_tensor_symmetric
 )
 
 # --------------------------
@@ -102,10 +99,9 @@ def binarize_input(x): # 圖片像素二質化
 # --------------------------
 def main():
     while 1:
-        # 使 fc 層的 zero_point 恆為零
-        torch.backends.quantized.engine = 'fbgemm'
-
         multiprocessing.freeze_support()
+
+        torch.backends.quantized.engine = 'fbgemm'
 
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print("使用裝置:", device)
@@ -126,12 +122,10 @@ def main():
 
         # 初始化模型 + QAT 設定
         model = SmallQuantCNN().to(device)
-        model.qconfig = torch.quantization.get_default_qat_qconfig('fbgemm')
-
-        # 使 fc 層的 zero_point 恆為零
-        model.fc.qconfig = QConfig(
-            activation = SymmetricActFakeQuant,
-            weight     = SymmetricWgtFakeQuant
+        # 使全模型每層的 zero point 皆為 0
+        model.qconfig = QConfig(
+            activation=actFakeQuant,
+            weight=wgtFakeQuant
         )
         torch.quantization.prepare_qat(model, inplace=True)
 
@@ -173,13 +167,9 @@ def main():
                 or isinstance(module, torch.nn.quantized.Linear):
                     act_s, act_zp = module.scale, module.zero_point
                     w_q = module.weight()
-                    # per-channel or per-tensor
-                    try:
-                        w_scales = w_q.q_per_channel_scales().cpu().numpy().tolist()
-                        w_zps    = w_q.q_per_channel_zero_points().cpu().numpy().tolist()
-                    except AttributeError:
-                        w_scales = w_q.q_scale()
-                        w_zps    = w_q.q_zero_point()
+                    # per-tensor
+                    w_scales = w_q.q_scale()
+                    w_zps    = w_q.q_zero_point()
                     w_int = w_q.int_repr().cpu().numpy()
 
                     f.write(f"=== {name} ===\n")
