@@ -9,11 +9,12 @@ from torch.quantization.observer import PerChannelMinMaxObserver, MovingAverageM
 from torch.quantization.fake_quantize import FakeQuantize
 import multiprocessing
 import numpy as np
+import copy
 
 # 對稱 signed int8 activation fake‐quant
 SymmetricActFakeQuant = FakeQuantize.with_args(
     observer=MovingAverageMinMaxObserver,   # 可改成其他 observer
-    quant_min=-127,                         # signed 8‐bit 對稱
+    quant_min=-128,                         # signed 8‐bit 對稱
     quant_max=127,
     dtype=torch.qint8,
     qscheme=torch.per_tensor_symmetric
@@ -22,7 +23,7 @@ SymmetricActFakeQuant = FakeQuantize.with_args(
 # 對稱 per‐channel signed int8 weight fake‐quant
 SymmetricWgtFakeQuant = FakeQuantize.with_args(
     observer=PerChannelMinMaxObserver,
-    quant_min=-127,
+    quant_min=-128,
     quant_max=127,
     dtype=torch.qint8,
     qscheme=torch.per_channel_symmetric,
@@ -92,101 +93,111 @@ def eval_model(model, loader, criterion, device):
             correct += (outputs.argmax(dim=1) == labels).sum().item()
     return total_loss/len(loader.dataset), correct/len(loader.dataset)
 
-# --------------------------
-# 3. 主程序
-# --------------------------
 def binarize_input(x): # 圖片像素二質化
     return (x > 0.5).float() # e.g. x = torch.tensor([0.2, 0.7, 0.3, 0.9])
                              #      return tensor([0.0, 1.0, 0.0, 1.0])
 
+# --------------------------
+# 3. 主程序
+# --------------------------
 def main():
-    # 使 fc 層的 zero_point 恆為零
-    torch.backends.quantized.engine = 'fbgemm'
+    while 1:
+        # 使 fc 層的 zero_point 恆為零
+        torch.backends.quantized.engine = 'fbgemm'
 
-    multiprocessing.freeze_support()
+        multiprocessing.freeze_support()
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print("使用裝置:", device)
-
-
-    transform = transforms.Compose([
-        transforms.CenterCrop(16),
-        transforms.ToTensor(), # 將圖片的儲存格式從 numpy 轉成 tensor，並將所有元素轉換為 0 到 1 間的浮點數
-        transforms.Lambda(binarize_input)
-    ])
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print("使用裝置:", device)
 
 
-    train_ds = datasets.MNIST('./data', train=True,  download=True, transform=transform)
-    test_ds  = datasets.MNIST('./data', train=False, download=True, transform=transform)
+        transform = transforms.Compose([
+            transforms.CenterCrop(16),
+            transforms.ToTensor(), # 將圖片的儲存格式從 numpy 轉成 tensor，並將所有元素轉換為 0 到 1 間的浮點數
+            transforms.Lambda(binarize_input)
+        ])
 
-    train_loader = DataLoader(train_ds, batch_size=10, shuffle=True,  num_workers=4, pin_memory=True) # shuffle=True 將訓練數據的順序打亂，避免過擬合
-    test_loader  = DataLoader(test_ds, batch_size=10, shuffle=False, num_workers=4, pin_memory=True)
 
-    # 初始化模型 + QAT 設定
-    model = SmallQuantCNN().to(device)
-    model.qconfig = torch.quantization.get_default_qat_qconfig('fbgemm')
+        train_ds = datasets.MNIST('./data', train=True,  download=True, transform=transform)
+        test_ds  = datasets.MNIST('./data', train=False, download=True, transform=transform)
 
-    # 使 fc 層的 zero_point 恆為零
-    model.fc.qconfig = QConfig(
-        activation = SymmetricActFakeQuant,
-        weight     = SymmetricWgtFakeQuant
-    )
-    torch.quantization.prepare_qat(model, inplace=True)
+        train_loader = DataLoader(train_ds, batch_size=10, shuffle=True,  num_workers=4, pin_memory=True) # shuffle=True 將訓練數據的順序打亂，避免過擬合
+        test_loader  = DataLoader(test_ds, batch_size=10, shuffle=False, num_workers=4, pin_memory=True)
 
-    print(f"模型總參數數量：{sum(p.numel() for p in model.parameters()):,d}")
+        # 初始化模型 + QAT 設定
+        model = SmallQuantCNN().to(device)
+        model.qconfig = torch.quantization.get_default_qat_qconfig('fbgemm')
 
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
-    criterion = nn.CrossEntropyLoss()
+        # 使 fc 層的 zero_point 恆為零
+        model.fc.qconfig = QConfig(
+            activation = SymmetricActFakeQuant,
+            weight     = SymmetricWgtFakeQuant
+        )
+        torch.quantization.prepare_qat(model, inplace=True)
 
-    best_acc = 0.0
-    last_5_acc = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
-    for epoch in range(1, 51):
-        tr_loss, tr_acc = train_epoch(model, train_loader, optimizer, criterion, device)
-        val_loss, val_acc = eval_model(model, test_loader, criterion, device)
-        print(f'Epoch {epoch:2d} | Train Acc: {tr_acc:.3f} | Val Acc: {val_acc:.3f}')
-        if val_acc > best_acc:
-            best_acc = val_acc
-            torch.save(model.state_dict(), 'best_qat.pth')
+        print(f"模型總參數數量：{sum(p.numel() for p in model.parameters()):,d}")
 
-        last_5_acc[0:4] = last_5_acc[1:]
-        last_5_acc[4] = val_acc
-        if np.std(last_5_acc) < 0.002:
-            print("周圍地貌近乎平坦，結束訓練")
+        optimizer = optim.Adam(model.parameters(), lr=1e-3)
+        criterion = nn.CrossEntropyLoss()
+
+        best_int8_acc = 0.0
+        last_best_record = 0
+        best_int8_model = None
+        for epoch in range(1, 76):
+            tr_loss, tr_acc = train_epoch(model, train_loader, optimizer, criterion, device)
+
+            # 將當前訓練出的模型量化為 int8，並評估精準度
+            qat_cpu = copy.deepcopy(model).cpu().eval()
+            int8_model = torch.quantization.convert(qat_cpu, inplace=False)
+            _, int8_acc = eval_model(int8_model, test_loader, criterion, torch.device('cpu'))
+            print(f'Epoch {epoch:2d} | Train Acc: {tr_acc:.3f} | Int8 Acc: {int8_acc:.3f}')
+
+            # 更新並保存最佳 Int8 模型
+            if int8_acc > best_int8_acc:
+                last_best_record = 0
+                best_int8_acc = int8_acc
+                best_int8_model = int8_model
+                torch.save(int8_model.state_dict(), 'best_qat_int8.pth')
+            else:
+                last_best_record += 1
+
+            if last_best_record == 5:
+                print("連續 5 次沒刷新準度紀錄，結束訓練")
+                break
+
+        torch.save(best_int8_model.state_dict(), f"mnist_int8_{best_int8_acc:.3f}.pth")
+        # 將量化後的 best_qat 模型的權重和 scale/zero 匯出成 .txt
+        with open(f"mnist_int8_params_{best_int8_acc:.3f}.txt", 'w') as f:
+            for name, module in best_int8_model.named_modules():
+                if isinstance(module, torch.nn.quantized.Conv2d) \
+                or isinstance(module, torch.nn.quantized.Linear):
+                    act_s, act_zp = module.scale, module.zero_point
+                    w_q = module.weight()
+                    # per-channel or per-tensor
+                    try:
+                        w_scales = w_q.q_per_channel_scales().cpu().numpy().tolist()
+                        w_zps    = w_q.q_per_channel_zero_points().cpu().numpy().tolist()
+                    except AttributeError:
+                        w_scales = w_q.q_scale()
+                        w_zps    = w_q.q_zero_point()
+                    w_int = w_q.int_repr().cpu().numpy()
+
+                    f.write(f"=== {name} ===\n")
+                    f.write(f"# act_scale={act_s}, act_zero_point={act_zp}\n")
+                    f.write(f"# wt_scales={w_scales}, wt_zero_points={w_zps}\n")
+                    f.write(np.array2string(
+                        w_int,
+                        separator=', ',
+                        max_line_width=np.inf,
+                        threshold=w_int.size+1
+                    ) + '\n\n')
+        print(f"量化後參數已匯出為 mnist_int8_params_{best_int8_acc:.3f}.txt (含 activation & weight qparams)")
+
+        if best_int8_acc >= 0.75:
             break
-
-    # 轉為 INT8 真正量化模型
-    print("轉換為 INT8 量化模型...")
-    model.cpu().eval()
-    quantized_model = torch.quantization.convert(model, inplace=False)
-
-    torch.save(quantized_model.state_dict(), 'mnist_int8.pth')
-    print("量化模型已儲存為 mnist_int8.pth")
-
-    with open('mnist_int8_params.txt', 'w') as f:
-        for name, module in quantized_model.named_modules():
-            if isinstance(module, torch.nn.quantized.Conv2d) \
-            or isinstance(module, torch.nn.quantized.Linear):
-                qweight = module.weight()
-                # 取整數值矩陣
-                w_int = qweight.int_repr().cpu().numpy()
-                # 取 scale / zero_point
-                scale = module.scale
-                zp    = module.zero_point
-
-                f.write(f"=== {name}.weight (qint8) ===\n")
-                f.write(f"# scale = {scale}, zero_point = {zp}\n")
-                f.write(np.array2string(
-                    w_int,
-                    separator=', ',
-                    max_line_width=np.inf,
-                    threshold=w_int.size+1
-                ) + '\n\n')
-
-    print("量化後參數已匯出為 mnist_int8_params.txt")
-
-    # 測試
-    test_loss, test_acc = eval_model(quantized_model, test_loader, criterion, torch.device('cpu'))
-    print(f'量化後測試準確度: {test_acc:.3f}')
+        else:
+            print("準確度小於 75%，重新訓練")
+            print("\nXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX\n\n")
 
 if __name__ == "__main__":
     main()
