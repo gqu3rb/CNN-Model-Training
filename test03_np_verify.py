@@ -1,3 +1,4 @@
+import re # for re object
 import numpy as np
 import sys
 import ast
@@ -30,17 +31,33 @@ def load_parameters(file_path): # 讀取參數 txt 檔 (建議對照 mnist_int8_
         if lines[i].startswith('==='):
             layer_name = lines[i].split()[1]
             i += 1
-            scale_zp = lines[i].strip().split('#')[1]
-            scale = float(scale_zp.split(',')[0].split('=')[1])
-            zp    = int(scale_zp.split(',')[1].split('=')[1])
+
+            act_line = lines[i].lstrip('#').strip()
+            parts = [p.strip() for p in act_line.split(',')]
+            act_scale = float(parts[0].split('=')[1])
+            act_zp    = int(parts[1].split('=')[1])
             i += 1
+
+            wt_line = lines[i].lstrip('#').strip()
+            m_scales = re.search(r'wt_scales=\[([^\]]*)\]', wt_line)
+            m_zps    = re.search(r'wt_zero_points=\[([^\]]*)\]', wt_line)
+            wt_scales = [float(x) for x in m_scales.group(1).split(',')]
+            wt_zps    = [int(x)   for x in m_zps.group(1).split(',')]
+            i += 1
+
             weight_arr_lines = []
             while i < len(lines) and not lines[i].startswith('==='): # 一直讀到下一個 '==='（或檔尾）
                 weight_arr_lines.append(lines[i])
                 i += 1
             arr = ast.literal_eval(''.join(weight_arr_lines))
             w_int = np.array(arr, dtype=np.int8)
-            model_params[layer_name] = {'w_int': w_int, 'zp': zp}
+            model_params[layer_name] = {
+                'act_scale':   act_scale,
+                'act_zero_point': act_zp,
+                'wt_scales':   wt_scales,
+                'wt_zero_points': wt_zps,
+                'w_int':       w_int
+            }
         else:
             i += 1
     return model_params
@@ -80,12 +97,19 @@ def maxpool_int(x, kernel):
 class IntegerCNN:
     def __init__(self, param_file):
         p = load_parameters(param_file)
-        w1 = p['conv1.weight']['w_int']  - p['conv1.weight']['zp']
-        w2 = p['conv2.weight']['w_int']  - p['conv2.weight']['zp']
-        w3 = p['fc.weight']['w_int']     - p['fc.weight']['zp']
-        self.w1 = w1.astype(np.int8)
-        self.w2 = w2.astype(np.int8)
-        self.w3 = w3.astype(np.int8)
+        w1 = p['conv1']['w_int'] # assume act_zp == 0
+        w2 = p['conv2']['w_int'] # assume act_zp == 0
+        w3 = p['fc']['w_int']
+        wt_scale1 = p['conv1']['wt_scales']
+        wt_scale2 = p['conv2']['wt_scales']
+        wt_scale3 = p['fc']['wt_scales']
+        self.w1 = w1.astype('int8')
+        self.w2 = w2.astype('int8')
+        self.w3 = w3.astype('int8')
+        self.wt_scale1 = wt_scale1
+        self.wt_scale2 = wt_scale2
+        self.wt_scale3 = wt_scale3
+
         #print(f"self.w1:\n{self.w1}\ntype:{type(self.w1)}\nshape:{self.w1.shape}")
         #print(f"self.w2:\n{self.w2}\ntype:{type(self.w2)}\nshape:{self.w2.shape}")
         #print(f"self.w3:\n{self.w3}\ntype:{type(self.w3)}\nshape:{self.w3.shape}")
@@ -95,17 +119,24 @@ class IntegerCNN:
         x = conv2d_int(x, self.w1, pad=1)
         x = relu_int(x)
         print(f"After conv1+relu:\n{x}")
+        print(f"before mul scale1, x.shape: {x.shape}")
+        x = x*np.array(self.wt_scale1).reshape(-1, 1, 1)
+        print(f"After mul scale1, x.shape: {x.shape}")
         x = maxpool_int(x, 2)
         print(f"After maxpool_1:\n{x}")
         x = conv2d_int(x, self.w2, pad=1)
         x = relu_int(x)
-        print(f"After conv2+relu:\n{x}")
+        print(f"before mul scale2, x.shape: {x.shape}")
+        x = x*np.array(self.wt_scale2).reshape(-1, 1, 1)
+        print(f"After mul scale2, x.shape: {x.shape}")
         x = maxpool_int(x, 8)
         print(f"After maxpool_2:\n{x}")
         x = x.reshape(-1)
         #print(f"After x.reshape(-1), x.shape = {x.shape}, x.dtype = {x.dtype}")
         x = np.dot(self.w3.astype(np.int32), x)
         print(f"After fc:\n{x}")
+        print(f"x.shape: {x.shape}")
+        x = np.array(self.wt_scale3).reshape(1, -1)*x
         return x
 
 def preprocess_int(img): # 只保留圖片中央 16x16，並做二值化
@@ -119,7 +150,7 @@ def main():
     test_ds = datasets.MNIST('./data', train=False,
                              download=True,
                              transform=None) # 由於 transform=None，因此 test_ds 的內容仍然是一張張的灰階 28x28 圖片和 label
-    model = IntegerCNN('mnist_int8_params.txt')
+    model = IntegerCNN('mnist_int8_params_0.753.txt')
     correct = 0
     round_count = 1
     for img, label in test_ds:
@@ -140,6 +171,7 @@ def main():
             print("CORRECT")
         else:
             print("WRONG")
+
     acc = correct / len(test_ds)
     print(f'整數推論準確度: {acc:.3f}')
 
