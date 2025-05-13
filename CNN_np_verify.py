@@ -88,36 +88,71 @@ class IntegerCNN:
         self.w2 = w2.astype('int8')
         self.w3 = w3.astype('int8')
 
-        #print(f"self.w1:\n{self.w1}\ntype:{type(self.w1)}\nshape:{self.w1.shape}")
-        #print(f"self.w2:\n{self.w2}\ntype:{type(self.w2)}\nshape:{self.w2.shape}")
-        #print(f"self.w3:\n{self.w3}\ntype:{type(self.w3)}\nshape:{self.w3.shape}")
+        print(f"self.w1:\n{self.w1}\ntype:{type(self.w1)}\nshape:{self.w1.shape}")
+        print(f"self.w2:\n{self.w2}\ntype:{type(self.w2)}\nshape:{self.w2.shape}")
+        print(f"self.w3:\n{self.w3}\ntype:{type(self.w3)}\nshape:{self.w3.shape}")
+
+        np.save('conv1 weight', w1)
+        np.save('conv2 weight', w2)
+        np.save('fc weight', w3)
 
     def forward(self, x):
-        print(f"input:\n{x}")
 
+        print(f"\nModel input x.shape = {x.shape}, x = \n{x}")
+
+        # 第一層卷積
+        # input channel: 1
+        # output channel: 4
+        # kernel size: 3x3
+        # zero padding size: 1
         x = conv2d_int(x, self.w1, pad=1) # x 中的元素大小範圍: [9*-128, 9*127] = [-1152, 1143]
+        print(f"\nAfter \"x = conv2d_int(x, self.w1, pad=1)\", x.shape = {x.shape}, x = \n{x}")
+
         x = relu_int(x) # x 中的元素大小範圍: [0, 1143]
-        print(f"After conv1+relu:\n{x}")
+        print(f"\nAfter \"x = relu_int(x)\", x.shape = {x.shape}, x = \n{x}")
+
         x = maxpool_int(x, 2)
-        print(f"After maxpool_1:\n{x}")
+        print(f"\nAfter \"x = maxpool_int(x, 2)\", x.shape = {x.shape}, x = \n{x}")
 
+        # 第二層卷積
+        # input channel: 4
+        # output channel: 5
+        # kernel size: 3x3
+        # zero padding size: 1
         x = conv2d_int(x, self.w2, pad=1) # x 中的元素大小範圍: [1143*(9*4)*-128, 1143*(9*4)*127] = [-5266944, 5225796] = [-2^22.33, 2^22.32] -> 23+1 個 bit 存 (加上去的那個 1 是 sign bit)
-        x = relu_int(x)
-        x = x>>9 # 右移以確保能以有號 16bit 的形式存進 Data Memory。事實上這裡移 (24-16) 個 bit 就好，但為了讓整個流程位移的 bit 數都相等，所以才移到 9 個 bit
-        if x.max() > 32767 or x.min() < -32768: # 如果 x 中的元素大小超過 int16 範圍，暫停程式
-            print(f"x = {x}")
-            input('')
-        x = maxpool_int(x, 8)
-        print(f"After maxpool_2:\n{x}")
+        print(f"\nAfter \"x = conv2d_int(x, self.w2, pad=1)\", x.shape = {x.shape}, x = \n{x}")
 
-        x = x.reshape(-1) # x 中的元素大小範圍: [-2^14, (2^14)-1] (因為剛剛右移了 9 個 bit)
-        #print(f"After x.reshape(-1), x.shape = {x.shape}, x.dtype = {x.dtype}")
-        x = np.dot(self.w3.astype(np.int32), x) # x 中的元素大小範圍: [((2^14)-1)*5*-128, (-2^14)*5*-128] = [-10485120, 10485760] = [-2^23.32, 2^23.32] -> 24+1 個 bit 存
-        x=x>>9 # 右移 (25-16) 個 bit 以確保能以有號 16bit 的形式存進 Data Memory
+        x = relu_int(x)
+        print(f"\nAfter \"x = relu_int(x)\", x.shape = {x.shape}, x = \n{x}")
+
+        x = x>>9 # 右移以確保能以有號 16bit 的形式存進 Data Memory。事實上這裡移 (24-16) 個 bit 就好，但為了讓整個流程位移的 bit 數都相等，所以才移到 9 個 bit
+        print(f"\nAfter \"x = x>>9\", x.shape = {x.shape}, x = \n{x}")
         if x.max() > 32767 or x.min() < -32768: # 如果 x 中的元素大小超過 int16 範圍，暫停程式
             print(f"x = {x}")
             input('')
-        print(f"After fc:\n{x}")
+
+        x = maxpool_int(x, 8)
+        print(f"\nAfter \"x = maxpool_int(x, 8)\", x.shape = {x.shape}, x = \n{x}")
+
+        # 將 x reshape，以送至全連接層
+        x = x.reshape(-1) # x 中的元素大小範圍: [-2^14, (2^14)-1] (因為剛剛右移了 9 個 bit)
+        print(f"\nAfter \"x = x.reshape(-1)\", x.shape = {x.shape}, x = \n{x}")
+
+        # 最後用來產生預測結果的全連接層
+        # input channel: 5
+        # output channel: 10
+        x = np.dot(self.w3.astype(np.int32), x) # x 中的元素大小範圍: [((2^14)-1)*5*-128, (-2^14)*5*-128] = [-10485120, 10485760] = [-2^23.32, 2^23.32] -> 24+1 個 bit 存
+        print(f"\nAfter \"x = np.dot(self.w3.astype(np.int32)\", x.shape = {x.shape}, x = \n{x}")
+
+        x=x>>9 # 右移 (25-16) 個 bit 以確保能以有號 16bit 的形式存進 Data Memory
+        print(f"\nAfter \"x = x>>9\", x.shape = {x.shape}, x = \n{x}")
+        if x.max() > 32767 or x.min() < -32768: # 如果 x 中的元素大小超過 int16 範圍，暫停程式
+            print(f"x = {x}")
+            input('')
+
+        pred = int(np.argmax(x))
+        print(f"\npredict number: {pred}")
+
         return x
 
 def preprocess_int(img): # 只保留圖片中央 16x16，並做二值化
