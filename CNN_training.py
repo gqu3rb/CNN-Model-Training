@@ -51,14 +51,14 @@ class SmallQuantCNN(nn.Module):
         torch.quantization.fuse_modules(self, ['conv2', 'relu2'], inplace=True)
 
     def forward(self, x):
-        x = self.quant(x)  # ➤ fake quantization 開始
+        x = self.quant(x)  # fake quantization 開始
 
         x = self.pool1(self.relu1(self.conv1(x)))
         x = self.pool2(self.relu2(self.conv2(x)))
         x = x.view(x.size(0), -1)
         x = self.fc(x)
 
-        x = self.dequant(x)  # ➤ fake quantization 結束
+        x = self.dequant(x)  # fake quantization 結束
         return x
 
 # --------------------------
