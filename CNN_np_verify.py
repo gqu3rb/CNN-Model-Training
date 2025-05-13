@@ -1,3 +1,4 @@
+# 如果只要使用此驗證程式，只需依照需求更改有標註 "#!!" 的區塊即可
 import re # for re object
 import numpy as np
 import sys
@@ -30,13 +31,7 @@ def load_parameters(file_path): # 讀取參數 txt 檔 (建議對照 mnist_int8_
     while i < len(lines):
         if lines[i].startswith('==='):
             layer_name = lines[i].split()[1]
-            i += 1
-
-            act_line = lines[i].lstrip('#').strip()
-            parts = [p.strip() for p in act_line.split(',')]
-            act_scale = float(parts[0].split('=')[1])
-            act_zp    = int(parts[1].split('=')[1])
-            i += 2
+            i += 3 # 直接跳過參數 txt 檔中記錄 activation scale/zero 和 weight scale/zero 的行
 
             weight_arr_lines = []
             while i < len(lines) and not lines[i].startswith('==='): # 一直讀到下一個 '==='（或檔尾）
@@ -99,18 +94,29 @@ class IntegerCNN:
 
     def forward(self, x):
         print(f"input:\n{x}")
-        x = conv2d_int(x, self.w1, pad=1)
-        x = relu_int(x)
+
+        x = conv2d_int(x, self.w1, pad=1) # x 中的元素大小範圍: [9*-128, 9*127] = [-1152, 1143]
+        x = relu_int(x) # x 中的元素大小範圍: [0, 1143]
         print(f"After conv1+relu:\n{x}")
         x = maxpool_int(x, 2)
         print(f"After maxpool_1:\n{x}")
-        x = conv2d_int(x, self.w2, pad=1)
+
+        x = conv2d_int(x, self.w2, pad=1) # x 中的元素大小範圍: [1143*(9*4)*-128, 1143*(9*4)*127] = [-5266944, 5225796] = [-2^22.33, 2^22.32] -> 23+1 個 bit 存 (加上去的那個 1 是 sign bit)
         x = relu_int(x)
+        x = x>>9 # 右移以確保能以有號 16bit 的形式存進 Data Memory。事實上這裡移 (24-16) 個 bit 就好，但為了讓整個流程位移的 bit 數都相等，所以才移到 9 個 bit
+        if x.max() > 32767 or x.min() < -32768: # 如果 x 中的元素大小超過 int16 範圍，暫停程式
+            print(f"x = {x}")
+            input('')
         x = maxpool_int(x, 8)
         print(f"After maxpool_2:\n{x}")
-        x = x.reshape(-1)
+
+        x = x.reshape(-1) # x 中的元素大小範圍: [-2^14, (2^14)-1] (因為剛剛右移了 9 個 bit)
         #print(f"After x.reshape(-1), x.shape = {x.shape}, x.dtype = {x.dtype}")
-        x = np.dot(self.w3.astype(np.int32), x)
+        x = np.dot(self.w3.astype(np.int32), x) # x 中的元素大小範圍: [((2^14)-1)*5*-128, (-2^14)*5*-128] = [-10485120, 10485760] = [-2^23.32, 2^23.32] -> 24+1 個 bit 存
+        x=x>>9 # 右移 (25-16) 個 bit 以確保能以有號 16bit 的形式存進 Data Memory
+        if x.max() > 32767 or x.min() < -32768: # 如果 x 中的元素大小超過 int16 範圍，暫停程式
+            print(f"x = {x}")
+            input('')
         print(f"After fc:\n{x}")
         return x
 
@@ -121,11 +127,9 @@ def preprocess_int(img): # 只保留圖片中央 16x16，並做二值化
     return binar
 
 def main():
-    # 載入 MNIST 測試集（請先下載好 ./data）
-    test_ds = datasets.MNIST('./data', train=False,
-                             download=True,
-                             transform=None) # 由於 transform=None，因此 test_ds 的內容仍然是一張張的灰階 28x28 圖片和 label
-    model = IntegerCNN('mnist_int8_params_0.722.txt')
+    # 載入 MNIST 測試集
+    test_ds = datasets.MNIST('./data', train=False, download=True, transform=None) # 由於 transform=None，因此 test_ds 的內容仍然是一張張的灰階 28x28 圖片和 label
+    model = IntegerCNN('mnist_int8_params_0.780.txt') #!! 要測試的權重 txt 檔名稱
     correct = 0
     round_count = 1
     for img, label in test_ds:
@@ -147,7 +151,11 @@ def main():
         else:
             print("WRONG")
 
-    acc = correct / len(test_ds)
+        #!! 如果要改成測整個資料集的準確度，就把這個 if 註解掉
+        #if round_count == 1001:
+        #    break
+
+    acc = correct / (round_count-1)
     print(f'整數推論準確度: {acc:.3f}')
 
 if __name__ == '__main__':

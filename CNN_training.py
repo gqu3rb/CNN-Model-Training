@@ -183,10 +183,10 @@ def main():
                     ) + '\n\n')
         print(f"量化後參數已匯出為 mnist_int8_params_{best_int8_acc:.3f}.txt (含 activation & weight qparams)")
 
-        if best_int8_acc >= 0.75:
+        if best_int8_acc >= 0.99:
             break
         else:
-            print("準確度小於 75%，重新訓練")
+            print("準確度小於 99%，重新訓練")
             print("\nXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX\n\n")
 
 if __name__ == "__main__":
